@@ -1,72 +1,135 @@
+
 # Debian Server Setup
 
-Bash scripts for initial Debian server configuration.
+Simple Bash scripts for initial Debian server configuration.
 
-## Installation
+## 1. Installation (root)
 
-Run as **root** on the target server.
-
-### 1. Clone repository
+Log in to the target Debian server as root.
 
 ```bash
 apt update && apt install -y git
+
 mkdir -p /root/git
 cd /root/git
-git clone git@github.com:jackousek/debian-server-setup.git
+
+git clone https://github.com/jackousek/debian-server-setup.git
 cd debian-server-setup
-```
 
-The private repository requires GitHub SSH access (preferably a read-only Deploy Key).
-
-### 2. Configure server
-
-```bash
 bash scripts/bootstrap.sh
 ```
 
-Installs Git, Vim, tmux and SSH, creates `itadmin`, configures sudo and SSH keys, and installs [dotfiles](https://github.com/jackousek/dotfiles).
+Bootstrap performs:
+- Install sudo, Git, Vim, tmux and OpenSSH.
+- Create `itadmin` and add it to the sudo group.
+- Copy root's authorized SSH keys if `itadmin` has none.
+- Set the initial administrator password.
+- Set Vim as the default editor.
+- Validate sudo and SSH configuration.
 
-### 3. Verify administrator access
+## 2. Verify administrator (itadmin)
 
-Open a **new terminal**:
+Open a new SSH session. Keep the root session open.
 
 ```bash
 ssh itadmin@SERVER_IP
+
+id
 sudo -v
 ```
 
-Keep the original root session open.
+Confirm that SSH public-key login and sudo work.
 
-### 4. Apply SSH hardening
+## 3. Install dotfiles (itadmin)
 
-Run from the original root session:
+Run as `itadmin`:
 
 ```bash
+cd ~
+git clone https://github.com/jackousek/dotfiles.git
+```
+
+Back up existing configuration files if present:
+
+```bash
+[ ! -e ~/.vimrc ] || mv ~/.vimrc ~/.vimrc.bak
+[ ! -e ~/.tmux.conf ] || mv ~/.tmux.conf ~/.tmux.conf.bak
+```
+
+Create symlinks:
+
+```bash
+ln -s ~/dotfiles/vim/.vimrc ~/.vimrc
+ln -s ~/dotfiles/tmux/.tmux.conf ~/.tmux.conf
+```
+
+Keep Debian's original `.bashrc` and add the Git settings:
+
+```bash
+echo '[ -f "$HOME/dotfiles/bash/.bashrc" ] && . "$HOME/dotfiles/bash/.bashrc"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+Only run this dotfiles installation once.
+
+## 4. SSH hardening (root)
+
+Before deployment:
+- Verify `itadmin` SSH key login and sudo.
+- Check backup and automation accounts using SSH.
+- Keep the existing SSH session open.
+- Ensure console recovery is available.
+
+Check that `/etc/ssh/sshd_config` contains:
+
+```text
+Include /etc/ssh/sshd_config.d/*.conf
+```
+
+If missing, back up the file and add the Include directive
+near the beginning using Vim. Validate with `sshd -t`.
+
+Then deploy:
+
+```bash
+cd /root/git/debian-server-setup
 bash scripts/apply-ssh-hardening.sh
 ```
 
-Disables root SSH login and password authentication. Requires SSH public keys.
+The script installs the Git-managed SSH policy into:
 
-**Important:** Test a new SSH connection immediately. The script does not provide automatic rollback after an authentication lockout.
+```text
+/etc/ssh/sshd_config.d/01-admin-hardening.conf
+```
 
-### 5. Optional cleanup
+The policy disables SSH password and root login.
+
+IMPORTANT: The script has no automatic rollback for SSH
+authentication failures. Test a new SSH login immediately.
+
+## 5. Optional cleanup (root)
+
+Check current services:
 
 ```bash
 bash scripts/cleanup-optional.sh --status
 ```
 
-Additional commands:
+Disable NRPE only after verifying replacement monitoring:
 
 ```bash
 bash scripts/cleanup-optional.sh --disable-nrpe
+```
+
+Expire the legacy account only after checking dependencies:
+
+```bash
 bash scripts/cleanup-optional.sh --expire-chinook
 ```
 
-Run only after verifying that the services or account are no longer needed.
+## 6. Updates
 
-## Updates
-
-Update server scripts:
+Update server scripts as root:
 
 ```bash
 cd /root/git/debian-server-setup
@@ -80,23 +143,14 @@ cd ~/dotfiles
 git pull --ff-only
 ```
 
-## Repository structure
-
-```text
-debian-server-setup/
-├── README.md
-├── scripts/
-│   ├── bootstrap.sh
-│   ├── apply-ssh-hardening.sh
-│   └── cleanup-optional.sh
-└── ssh/
-    └── 01-admin-hardening.conf
-```
+Git updates do not automatically apply SSH security changes.
 
 ## Security
 
-- Run installation scripts as root.
-- Use `itadmin` for regular administration.
-- Never store passwords or private SSH keys in Git.
-- Verify SSH and sudo before applying hardening.
-- Keep console recovery access available during SSH changes.
+- Run server setup scripts as root.
+- Use `itadmin` for normal administration.
+- Never store passwords or private keys in Git.
+- Verify SSH access before disabling root login.
+- Check service dependencies before disabling anything.
+
+
