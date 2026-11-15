@@ -2,50 +2,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Debian user audit and legacy account cleanup.
+# Debian user audit and legacy chinook cleanup.
 # Run as root.
-#
-# root      - console recovery
-# itadmin   - SSH public key + sudo
-# backupsvc - SSH public key for backups (do not modify)
-# chinook   - legacy account to disable
+# Never modifies root, itadmin or backupsvc.
 
 [[ $EUID -eq 0 ]] || {
     echo "ERROR: Run as root."
     exit 1
-}
-
-show_chinook() {
-    echo
-    echo "=== CHINOOK PRIVILEGES ==="
-
-    if ! getent passwd chinook >/dev/null; then
-        echo "CHINOOK: NOT PRESENT"
-        return
-    fi
-
-    local uid shell status expiry
-
-    uid="$(id -u chinook)"
-    shell="$(getent passwd chinook | cut -d: -f7)"
-    status="$(passwd -S chinook | awk '{print $2}')"
-    expiry="$(getent shadow chinook | cut -d: -f8)"
-
-    if [[ "$uid" -eq 0 ]]; then
-        echo "ROOT EQUIVALENT (UID 0): YES"
-    else
-        echo "ROOT EQUIVALENT (UID 0): NO (UID $uid)"
-    fi
-
-    if id -nG chinook | tr ' ' '\n' | grep -Fxq sudo; then
-        echo "SUDO GROUP: YES"
-    else
-        echo "SUDO GROUP: NO"
-    fi
-
-    echo "PASSWORD STATUS: $status"
-    echo "LOGIN SHELL: $shell"
-    echo "ACCOUNT EXPIRY: ${expiry:-never}"
 }
 
 audit() {
@@ -56,43 +19,49 @@ audit() {
     }'
 
     echo
-    echo "=== ACCOUNTS WITH USABLE PASSWORDS ==="
-
+    echo "=== ACCOUNTS WITH PASSWORDS ==="
     while IFS=: read -r user rest; do
-        status="$(passwd -S "$user" 2>/dev/null |
-                  awk '{print $2}' || true)"
-
-        if [[ "$status" == "P" ]]; then
-            echo "$user"
-        fi
+        status=$(passwd -S "$user" 2>/dev/null |
+                 awk '{print $2}' || true)
+        [[ "$status" == P ]] && echo "$user"
     done < <(getent passwd)
 
     echo
-    echo "=== ACCOUNTS WITH LOGIN SHELLS ==="
-
+    echo "=== LOGIN SHELLS ==="
     getent passwd | awk -F: '
         $7 !~ /(nologin|false)$/ && $7 != "/bin/sync" {
             print $1, "UID=" $3, "SHELL=" $7
         }'
 
     echo
-    echo "=== SSH AUTHORIZED KEYS ==="
-
-    while IFS=: read -r user x uid gid info home shell; do
-        if [[ -s "$home/.ssh/authorized_keys" ]]; then
-            echo "$user: $home/.ssh/authorized_keys"
-        fi
-    done < <(getent passwd)
-
-    echo
     echo "=== SUDO GROUP ==="
     getent group sudo || true
 
-    show_chinook
+    echo
+    echo "=== CHINOOK ==="
+    if getent passwd chinook >/dev/null; then
+        getent passwd chinook
+        passwd -S chinook
+        chage -l chinook | grep "Account expires"
+
+        if [[ $(id -u chinook) -eq 0 ]]; then
+            echo "CHINOOK ROOT EQUIVALENT: YES"
+        else
+            echo "CHINOOK ROOT EQUIVALENT: NO"
+        fi
+
+        if id -nG chinook | tr ' ' '\n' |
+           grep -Fxq sudo; then
+            echo "CHINOOK SUDO: YES"
+        else
+            echo "CHINOOK SUDO: NO"
+        fi
+    else
+        echo "CHINOOK: NOT PRESENT"
+    fi
 
     echo
     echo "=== REQUIRED ACCOUNTS ==="
-
     for user in root itadmin backupsvc; do
         if getent passwd "$user" >/dev/null; then
             echo "$user: $(passwd -S "$user" | awk '{print $2}')"
@@ -103,103 +72,201 @@ audit() {
 
     echo
     echo "=== DIRECT CHINOOK SUDO RULES ==="
-
     grep -REn '^[[:space:]]*chinook[[:space:]]' \
-        /etc/sudoers /etc/sudoers.d/ 2>/dev/null || true
-
-    echo
-    echo "=== SSH SECURITY ==="
-
-    /usr/sbin/sshd -t
-
-    /usr/sbin/sshd -T \
-        -C user=itadmin,host=localhost,addr=127.0.0.1 |
-        grep -E \
-        '^(permitrootlogin|pubkeyauthentication|passwordauthentication|kbdinteractiveauthentication|authenticationmethods) '
+        /etc/sudoers /etc/sudoers.d 2>/dev/null || true
 }
 
-disable_chinook() {
+change_chinook_uid() {
+    local uid new_uid workdir editor_script
+
+    uid=$(id -u chinook)
+
+    # Only migrate a duplicate UID 0 account.
+    [[ "$uid" -eq 0 ]] || return 0
+
+    echo "=== CHINOOK HAS UID 0 ==="
+
+    # Require a normal, local root account.
+    [[ "$(getent passwd root | cut -d: -f3)" == 0 ]] || {
+        echo "ERROR: Invalid root account."
+        return 1
+    }
+
+    # This migration only supports a local passwd entry.
+    [[ "$(awk -F: '$1=="chinook"{n++} END{print n+0}' \
+        /etc/passwd)" == 1 ]] || {
+        echo "ERROR: chinook is not a unique local account."
+        return 1
+    }
+
+    command -v vipw >/dev/null
+    command -v python3 >/dev/null
+
+    # Choose an unused UID.
+    new_uid=""
+    for candidate in $(seq 20000 29999); do
+        if ! getent passwd "$candidate" >/dev/null; then
+            new_uid="$candidate"
+            break
+        fi
+    done
+
+    [[ -n "$new_uid" ]] || {
+        echo "ERROR: No available UID."
+        return 1
+    }
+
+    echo "Changing chinook UID: 0 -> $new_uid"
+    echo "Root-owned files will NOT be chowned."
+
+    workdir=$(mktemp -d /run/chinook-uid.XXXXXXXX)
+    editor_script="$workdir/editor"
+    
+    cat > "$editor_script" <<'PYTHON'
+#!/usr/bin/python3
+import os
+import sys
+
+path = sys.argv[1]
+new_uid = os.environ["CHINOOK_NEW_UID"]
+
+with open(path, encoding="utf-8") as f:
+    lines = f.readlines()
+
+matches = [
+    i for i, line in enumerate(lines)
+    if line.split(":", 1)[0] == "chinook"
+]
+
+if len(matches) != 1:
+    sys.exit("Invalid chinook entry count")
+
+i = matches[0]
+fields = lines[i].rstrip("\n").split(":")
+
+if len(fields) != 7 or fields[2] != "0":
+    sys.exit("Unexpected chinook passwd entry")
+
+fields[2] = new_uid
+lines[i] = ":".join(fields) + "\n"
+
+with open(path, "w", encoding="utf-8") as f:
+    f.writelines(lines)
+PYTHON
+
+    chmod 700 "$editor_script"
+
+    # vipw locks the passwd database while editing.
+    if ! CHINOOK_NEW_UID="$new_uid" \
+         EDITOR="$editor_script" \
+         VISUAL="$editor_script" vipw; then
+        rm -f "$editor_script"
+        rmdir "$workdir"
+        echo "ERROR: UID migration failed."
+        return 1
+    fi
+
+    rm -f "$editor_script"
+    rmdir "$workdir"
+
+    [[ "$(id -u chinook)" == "$new_uid" ]] || {
+        echo "ERROR: UID verification failed."
+        return 1
+    }
+
+    echo "CHINOOK UID: $new_uid"
+}
+
+apply() {
+    echo "=== USER SECURITY CLEANUP ==="
+
     if ! getent passwd chinook >/dev/null; then
-        echo "CHINOOK: NOT PRESENT - no changes."
+        echo "CHINOOK: NOT PRESENT"
+        audit
         return
     fi
 
-    local uid status shell expiry
+    # Ensure required administrator accounts exist.
+    for user in root itadmin backupsvc; do
+        getent passwd "$user" >/dev/null || {
+            echo "ERROR: Required account missing: $user"
+            return 1
+        }
+    done
 
-    uid="$(id -u chinook)"
-
-    if [[ "$uid" -eq 0 ]]; then
-        echo "ERROR: chinook has UID 0."
-        echo "Manual review required."
-        return 1
+    # A legacy account with UID 0 shares root's process identity.
+    # Never attempt to kill processes by its UID.
+    if [[ $(id -u chinook) -ne 0 ]]; then
+        if pgrep -u "$(id -u chinook)" >/dev/null; then
+            echo "ERROR: chinook has running processes."
+            return 1
+        fi
     fi
 
-    # Do not disrupt running services or sessions.
-    if pgrep -u "$uid" >/dev/null 2>&1; then
-        echo "ERROR: chinook has running processes."
-        echo "Review them before disabling the account."
-        return 1
-    fi
-
-    echo "=== DISABLING CHINOOK ==="
+    echo "=== DISABLE CHINOOK LOGIN ==="
 
     usermod --lock chinook
     usermod --expiredate 1 chinook
     usermod --shell /usr/sbin/nologin chinook
 
-    if id -nG chinook | tr ' ' '\n' | grep -Fxq sudo; then
+    change_chinook_uid
+
+    echo "=== REMOVE SUDO GROUP ==="
+
+    if id -nG chinook | tr ' ' '\n' |
+       grep -Fxq sudo; then
         gpasswd -d chinook sudo
     fi
 
-    echo
-    echo "=== VERIFY CHINOOK ==="
+    echo "=== VERIFY ==="
 
-    status="$(passwd -S chinook | awk '{print $2}')"
-    shell="$(getent passwd chinook | cut -d: -f7)"
-    expiry="$(getent shadow chinook | cut -d: -f8)"
-
-    if [[ "$status" != "L" ||
-          "$shell" != "/usr/sbin/nologin" ||
-          "$expiry" != "1" ]]; then
-        echo "ERROR: chinook disable verification failed."
+    [[ $(id -u chinook) -ne 0 ]] || {
+        echo "ERROR: chinook still has UID 0."
         return 1
-    fi
+    }
 
-    if id -nG chinook | tr ' ' '\n' | grep -Fxq sudo; then
+    [[ $(passwd -S chinook | awk '{print $2}') == L ]] || {
+        echo "ERROR: Password is not locked."
+        return 1
+    }
+
+    [[ $(getent passwd chinook | cut -d: -f7) \
+       == /usr/sbin/nologin ]] || {
+        echo "ERROR: Login shell is still enabled."
+        return 1
+    }
+
+    [[ $(getent shadow chinook | cut -d: -f8) == 1 ]] || {
+        echo "ERROR: Account is not expired."
+        return 1
+    }
+
+    if id -nG chinook | tr ' ' '\n' |
+       grep -Fxq sudo; then
         echo "ERROR: chinook still belongs to sudo."
         return 1
     fi
 
     if grep -REq '^[[:space:]]*chinook[[:space:]]' \
-        /etc/sudoers /etc/sudoers.d/ 2>/dev/null; then
-        echo "WARNING: Direct chinook sudo rule exists."
-        echo "Manual review required."
+       /etc/sudoers /etc/sudoers.d 2>/dev/null; then
+        echo "WARNING: Direct chinook sudo rule remains."
         return 1
     fi
 
-    echo "CHINOOK: DISABLED"
-    echo "Password locked."
-    echo "Account expired."
-    echo "Login shell disabled."
-    echo "Sudo group removed."
+    echo "CHINOOK: DISABLED SUCCESSFULLY"
+    audit
 }
 
 case "${1:-}" in
     --status)
         audit
         ;;
-
     --apply)
-        disable_chinook
-        audit
-        echo
-        echo "USER AUDIT COMPLETED"
+        apply
         ;;
-
     *)
         echo "Usage: $0 --status | --apply"
         exit 2
         ;;
 esac
-
 

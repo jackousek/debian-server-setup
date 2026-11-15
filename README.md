@@ -93,26 +93,22 @@ Automatically disable chinook:
 bash scripts/user-audit.sh --apply
 ```
 
-The script:
-- Lists UID 0 accounts.
-- Lists accounts with usable passwords.
-- Lists accounts with login shells.
-- Lists SSH authorized_keys files.
-- Lists sudo group membership.
-- Reports whether chinook has UID 0.
-- Reports whether chinook belongs to sudo.
-- Locks chinook's password.
-- Expires chinook's account.
-- Disables chinook's login shell.
+
+The user audit script:
+- Lists UID 0 accounts and usable passwords.
+- Reports chinook UID and sudo privileges.
+- Locks and expires chinook.
+- Disables chinook's shell.
+- Assigns a free UID if chinook has UID 0.
 - Removes chinook from the sudo group.
-- Verifies the changes.
+- Verifies the final configuration.
+- Preserves root, itadmin and backupsvc.
 
-The script does not modify root, itadmin or backupsvc.
+For shared UID 0 accounts, root-owned files
+are not automatically changed.
 
-If chinook has UID 0 or running processes,
-the script stops for manual investigation.
-
-Review unexpected accounts and direct sudo rules.
+Review direct sudo rules and server dependencies.
+Test on one server before wider deployment.
 
 ### Step 4 — Disable unused services
 
