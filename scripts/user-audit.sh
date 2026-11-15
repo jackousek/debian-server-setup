@@ -226,8 +226,11 @@ PYTHON
     local result=0
 
     CHINOOK_NEW_UID="$new_uid" \
-        EDITOR="$editor" VISUAL="$editor" vipw -q || result=$?
+    EDITOR="/usr/bin/python3 $editor" \
+    VISUAL="/usr/bin/python3 $editor" \
+    vipw -q || result=$?
 
+    
     rm -rf "$tmpdir"
 
     [[ "$result" -eq 0 ]] || {
