@@ -163,6 +163,15 @@ Verify CheckMK and important applications.
 The script does not uninstall packages
 or modify user accounts.
 
+#Postfix ETH
+cp -a /etc/postfix/main.cf /etc/postfix/main.cf.bak
+
+postconf -e 'inet_interfaces = loopback-only'
+postfix check
+systemctl restart postfix
+
+
+
 ### Step 5 — Automatic security updates
 
 ```bash
