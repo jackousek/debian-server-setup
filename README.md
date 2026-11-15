@@ -1,59 +1,206 @@
 
 # Debian Server Setup
 
-Simple Bash scripts for initial Debian server configuration.
+Standard setup, security and maintenance for Debian servers.
 
-## 1. Installation (root)
+Repository:
+https://github.com/jackousek/debian-server-setup
 
-Log in to the target Debian server as root.
+# QUICK START — EVERY SERVER
+
+Run commands as root unless stated otherwise.
+
+## 1. Get scripts
+
+On a new server:
 
 ```bash
 apt update && apt install -y git
-
 mkdir -p /root/git
 cd /root/git
-
 git clone https://github.com/jackousek/debian-server-setup.git
 cd debian-server-setup
+```
 
+On an existing server with the repository:
+
+```bash
+cd /root/git/debian-server-setup
+git pull --ff-only
+```
+
+## 2. SECURITY
+
+- [ ] Create and verify itadmin
+- [ ] Install dotfiles as itadmin (optional)
+- [ ] Standardize SSH configuration
+- [ ] Audit user accounts
+- [ ] Disable chinook
+- [ ] Verify backupsvc SSH access
+- [ ] Review unnecessary services
+- [ ] Enable automatic security updates
+- [ ] Verify SSH and monitoring
+
+Run as root:
+
+```bash
 bash scripts/bootstrap.sh
 ```
 
-Bootstrap performs:
-- Install sudo, Git, Vim, tmux and OpenSSH.
-- Create `itadmin` and add it to the sudo group.
-- Copy root's authorized SSH keys if `itadmin` has none.
-- Set the initial administrator password.
-- Set Vim as the default editor.
-- Validate sudo and SSH configuration.
-
-## 2. Verify administrator (itadmin)
-
-Open a new SSH session. Keep the root session open.
+Open a NEW SSH session as itadmin and verify:
 
 ```bash
-ssh itadmin@SERVER_IP
-
 id
 sudo -v
 ```
 
-Confirm that SSH public-key login and sudo work.
+Keep the original root session open.
 
-## 3. Install dotfiles (itadmin)
+After reviewing existing SSH settings and confirming
+that backupsvc and other required SSH accounts are supported:
 
-Run as `itadmin`:
+```bash
+bash scripts/standardize-ssh.sh
+```
+
+Immediately test a NEW itadmin SSH connection.
+
+Audit user accounts:
+
+```bash
+bash scripts/user-audit.sh --status
+```
+
+After reviewing dependencies, disable chinook:
+
+```bash
+bash scripts/user-audit.sh --disable-chinook
+```
+
+Check unnecessary services:
+
+```bash
+bash scripts/cleanup-optional.sh --status
+```
+
+Disable NRPE only if no longer required:
+
+```bash
+bash scripts/cleanup-optional.sh --disable-nrpe
+```
+
+NFS and RPC must be reviewed separately.
+The cleanup script does not disable them.
+
+Enable automatic security updates:
+
+```bash
+bash scripts/enable-security-updates.sh
+```
+
+Review the script's dry-run output and allowed repositories.
+Verify CheckMK monitoring and important applications.
+
+SECURITY OK = All checks passed.
+
+## 3. BACKUP
+
+- [ ] Create timestamp test file
+- [ ] Wait for next scheduled rsync backup
+- [ ] Verify the file on the backup server
+- [ ] Confirm backup failure email alerts
+
+On production server:
+
+```bash
+bash scripts/create-backup-test.sh
+```
+
+The script creates:
+
+```text
+/root/backup-test.txt
+```
+
+After the next backup, locate the file on the backup
+server and compare its hostname and timestamp.
+
+This test requires /root to be included in the backup.
+
+BACKUP OK = Test file transferred successfully and
+backup failure notifications are configured.
+
+This checks one file transfer, not a full restore.
+
+## 4. UPDATE
+
+- [ ] Verify backup before updating
+- [ ] Check Debian version
+- [ ] Review pending packages
+- [ ] Perform package updates
+- [ ] Reboot if required
+- [ ] Verify services and applications
+- [ ] Verify CheckMK monitoring
+
+Check:
+
+```bash
+cat /etc/os-release
+apt update
+apt list --upgradable
+apt-get -s upgrade
+```
+
+Perform regular package upgrade:
+
+```bash
+apt upgrade
+```
+
+After updating:
+
+```bash
+systemctl --failed
+systemctl list-units --type=service --state=running
+```
+
+Check whether a reboot is required:
+
+```bash
+test -f /run/reboot-required && cat /run/reboot-required
+```
+
+Reboot during a maintenance window if required.
+
+Verify SSH, databases, applications, backups and monitoring.
+
+IMPORTANT:
+apt upgrade is NOT a major Debian version upgrade.
+Major upgrades (for example Debian 12 to 13)
+require a separate procedure.
+
+UPDATE OK = Packages updated and services verified.
+
+---
+
+# ADDITIONAL COMMANDS
+
+## Install dotfiles — ITADMIN
+
+Log in as itadmin.
+
+Run once:
 
 ```bash
 cd ~
 git clone https://github.com/jackousek/dotfiles.git
 ```
 
-Back up existing configuration files if present:
+Back up existing configuration files:
 
 ```bash
-[ ! -e ~/.vimrc ] || mv ~/.vimrc ~/.vimrc.bak
-[ ! -e ~/.tmux.conf ] || mv ~/.tmux.conf ~/.tmux.conf.bak
+[ ! -e ~/.vimrc ] && [ ! -L ~/.vimrc ] || mv ~/.vimrc ~/.vimrc.bak
+[ ! -e ~/.tmux.conf ] && [ ! -L ~/.tmux.conf ] || mv ~/.tmux.conf ~/.tmux.conf.bak
 ```
 
 Create symlinks:
@@ -63,122 +210,115 @@ ln -s ~/dotfiles/vim/.vimrc ~/.vimrc
 ln -s ~/dotfiles/tmux/.tmux.conf ~/.tmux.conf
 ```
 
-Keep Debian's original `.bashrc` and add the Git settings:
+Load Git-managed Bash configuration:
 
 ```bash
 echo '[ -f "$HOME/dotfiles/bash/.bashrc" ] && . "$HOME/dotfiles/bash/.bashrc"' >> ~/.bashrc
 source ~/.bashrc
 ```
 
-Only run this dotfiles installation once.
+## Update dotfiles — ITADMIN
 
-## 4. SSH hardening (root)
-
-Before deployment:
-- Verify `itadmin` SSH key login and sudo.
-- Check backup and automation accounts using SSH.
-- Keep the existing SSH session open.
-- Ensure console recovery is available.
-
-Check that `/etc/ssh/sshd_config` contains:
-
-```text
-Include /etc/ssh/sshd_config.d/*.conf
+```bash
+git -C ~/dotfiles pull --ff-only
 ```
 
-If missing, back up the file and add the Include directive
-near the beginning using Vim. Validate with `sshd -t`.
+## Update server scripts — ROOT
 
-Then deploy:
+```bash
+git -C /root/git/debian-server-setup pull --ff-only
+```
+
+## Update SSH security policy — ROOT
+
+Use only when the SSH policy changes in Git:
 
 ```bash
 cd /root/git/debian-server-setup
 bash scripts/apply-ssh-hardening.sh
 ```
 
-The script installs the Git-managed SSH policy into:
+Keep the existing SSH session open and test a new login.
+
+---
+
+# SCRIPT REFERENCE
+
+| Script | Purpose |
+|---|---|
+| bootstrap.sh | Create itadmin, install packages, configure sudo |
+| standardize-ssh.sh | Restore Debian SSH defaults and apply security policy |
+| apply-ssh-hardening.sh | Update SSH security policy only |
+| user-audit.sh | Audit users and disable chinook |
+| cleanup-optional.sh | Check NFS/RPC/NRPE and optionally disable NRPE |
+| enable-security-updates.sh | Configure daily automatic security updates |
+| create-backup-test.sh | Generate timestamp file for rsync test |
+
+All scripts are located in:
 
 ```text
-/etc/ssh/sshd_config.d/01-admin-hardening.conf
+/root/git/debian-server-setup/scripts/
 ```
 
-The policy disables SSH password and root login.
+# SECURITY POLICY
 
-IMPORTANT: The script has no automatic rollback for SSH
-authentication failures. Test a new SSH login immediately.
+root:
+- Password retained for console recovery.
+- SSH login disabled.
 
-## 5. Optional cleanup (root)
+itadmin:
+- Standard administrator.
+- SSH public-key authentication only.
+- Sudo access with password.
 
-Check current services:
+backupsvc:
+- Dedicated rsync backup account.
+- SSH public-key authentication.
+- No usable password.
+- Must remain functional after SSH changes.
 
-```bash
-bash scripts/cleanup-optional.sh --status
-```
+chinook:
+- Legacy UID 0 account.
+- Password locked, account expired, shell disabled.
+- Do not delete before reviewing dependencies.
 
-Disable NRPE only after verifying replacement monitoring:
+SSH:
+- Standard port 22.
+- Debian's original sshd_config.
+- Git-managed security drop-in.
+- No SSH password authentication.
+- Restrict access using network firewall rules.
 
-```bash
-bash scripts/cleanup-optional.sh --disable-nrpe
-```
+Automatic updates:
+- Debian security updates only.
+- Daily checks and installation.
+- No automatic OS reboot.
+- Review service restart behavior on critical servers.
 
-Expire the legacy account only after checking dependencies:
+# IMPORTANT
 
-```bash
-bash scripts/cleanup-optional.sh --expire-chinook
-```
+Before SSH changes:
+1. Verify a NEW itadmin SSH key login.
+2. Verify sudo.
+3. Check backupsvc and other SSH-dependent services.
+4. Keep the original SSH connection open.
+5. Ensure console recovery access is available.
 
-## 6. Updates
+The SSH scripts have no timed automatic rollback.
 
-Update server scripts as root:
+Before disabling services:
+Check dependencies, active connections and monitoring.
 
-```bash
-cd /root/git/debian-server-setup
-git pull --ff-only
-```
+Before updating Debian:
+Verify the backup first.
 
-Update dotfiles as `itadmin`:
+# EXCEL STATUS
 
-```bash
-cd ~/dotfiles
-git pull --ff-only
-```
+For every server, record:
 
-Git updates do not automatically apply SSH security changes.
+Security OK | Backup OK | Update OK
 
-## Security
-
-- Run server setup scripts as root.
-- Use `itadmin` for normal administration.
-- Never store passwords or private keys in Git.
-- Verify SSH access before disabling root login.
-- Check service dependencies before disabling anything.
-
-### Standardize SSH configuration (root)
-
-Restores the original Debian `sshd_config` and installs the Git-managed security policy.
-
-Run only after verifying SSH public-key login and sudo access for `itadmin`.
-
-```bash
-cd /root/git/debian-server-setup
-bash scripts/standardize-ssh.sh
-```
-
-The script:
-
-- Verifies the Debian package configuration.
-- Displays differences from the current configuration.
-- Backs up existing SSH files.
-- Requires confirmation before deployment.
-- Installs `01-admin-hardening.conf`.
-- Validates SSH settings before reloading.
-- Restores previous files if deployment fails.
-
-Keep the existing SSH connection open and test a new login immediately afterward.
-
-Review existing SSH customizations and backup accounts before proceeding. No timed automatic rollback is provided.
-
-For ordinary policy updates without replacing the main configuration, use `scripts/apply-ssh-hardening.sh`.
-
+Use OK only when all checks in that stage have passed.
+Use Pending or Issue otherwise.
 
 
