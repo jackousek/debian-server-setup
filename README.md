@@ -1,7 +1,7 @@
 
 # Debian Server Setup
 
-Standard Debian server setup, security and maintenance.
+Standard setup, security and maintenance for Debian servers.
 
 Repository:
 https://github.com/jackousek/debian-server-setup
@@ -38,7 +38,7 @@ bash scripts/bootstrap.sh
 ```
 
 Creates itadmin, installs administration packages,
-configures sudo and copies SSH authorized keys
+configures sudo, and copies SSH authorized keys
 when appropriate.
 
 Open a NEW SSH session as itadmin:
@@ -66,16 +66,20 @@ bash scripts/standardize-ssh.sh
 The script:
 - Backs up the existing SSH configuration.
 - Displays differences from Debian's reference.
-- Restores the Debian SSH reference configuration.
+- Replaces the main SSH configuration with the reference.
 - Installs our Git-managed security policy.
-- Validates the SSH configuration.
-- Reloads SSH and checks the service.
+- Validates SSH syntax and effective settings.
+- Reloads SSH and checks that the service is active.
+
+IMPORTANT:
+The reference configuration is not guaranteed to match
+the package-maintained conffile checksum. Package upgrade
+prompts may still occur.
 
 Test a NEW itadmin SSH login immediately.
-
 Verify backupsvc access from the backup server.
 
-### Step 3 — User audit
+### Step 3 — User security audit
 
 Read-only audit:
 
@@ -83,7 +87,7 @@ Read-only audit:
 bash scripts/user-audit.sh --status
 ```
 
-Automatic chinook cleanup:
+Automatically disable chinook:
 
 ```bash
 bash scripts/user-audit.sh --apply
@@ -103,40 +107,65 @@ The script:
 - Removes chinook from the sudo group.
 - Verifies the changes.
 
-No changes are made to root, itadmin or backupsvc.
+The script does not modify root, itadmin or backupsvc.
 
 If chinook has UID 0 or running processes,
 the script stops for manual investigation.
 
 Review unexpected accounts and direct sudo rules.
 
-### Step 4 — Legacy services
+### Step 4 — Disable unused services
+
+Check current status:
 
 ```bash
 bash scripts/cleanup-optional.sh --status
 ```
 
-Check:
+Disable unused NFS, RPC and NRPE services:
+
+```bash
+bash scripts/cleanup-optional.sh --apply
+```
+
+The script targets:
 - nfs-server
-- rpcbind
+- nfs-kernel-server
+- nfs-common
 - nfs-blkmap
+- nfs-idmapd
+- nfs-utils
+- nfs-client
+- rpcbind
+- rpc-statd
+- rpc-gssd
+- rpc-svcgssd
 - fsidd
 - nagios-nrpe-server
 
-Also inspect network listeners:
+The script:
+- Checks for active NFS mounts.
+- Checks NFS entries in /etc/fstab.
+- Checks configured NFS exports.
+- Stops if these dependencies are detected.
+- Stops and disables matching systemd units.
+- Masks them to prevent future activation.
+- Verifies the final unit states.
+
+IMPORTANT:
+Do not run --apply on servers requiring NFS,
+RPC or NRPE. Masking prevents service activation.
+
+Check network listeners:
 
 ```bash
-ss -tulpen
+ss -lntup
 ```
 
-Disable NRPE only if replacement monitoring works:
+Verify CheckMK and important applications.
 
-```bash
-bash scripts/cleanup-optional.sh --disable-nrpe
-```
-
-NFS/RPC services require individual dependency review.
-The script does not automatically disable them.
+The script does not uninstall packages
+or modify user accounts.
 
 ### Step 5 — Automatic security updates
 
@@ -149,8 +178,7 @@ Target configuration:
 - Daily checks and installation.
 - No automatic OS reboot.
 
-Review the script output and verify the effective
-allowed repositories and dry-run result.
+Review allowed repositories and the dry-run result.
 
 Check timers:
 
@@ -158,7 +186,8 @@ Check timers:
 systemctl list-timers 'apt-daily*'
 ```
 
-Review service restart behavior on critical servers.
+Review automatic service restart behavior,
+especially on production database servers.
 
 ### Step 6 — Final security verification
 
@@ -171,11 +200,12 @@ Review service restart behavior on critical servers.
 - [ ] UID 0 accounts reviewed
 - [ ] Other user passwords reviewed
 - [ ] backupsvc SSH access works
-- [ ] Unnecessary services reviewed
+- [ ] Unnecessary NFS/RPC/NRPE services disabled
 - [ ] Automatic security updates configured
 - [ ] CheckMK monitoring works
+- [ ] Firewall access reviewed
 
-SECURITY OK — All required checks passed.
+SECURITY OK — All checks passed.
 
 ---
 
@@ -208,10 +238,10 @@ After the next scheduled rsync backup:
 
 The backup must include /root/.
 
-This checks transfer of the test file, not
-full backup consistency or restore capability.
+This verifies one file transfer, not the
+completeness or recoverability of the entire backup.
 
-BACKUP OK — File verified and notifications checked.
+BACKUP OK — Test file transferred and alerts checked.
 
 ---
 
@@ -239,8 +269,8 @@ apt upgrade
 
 Confirm package changes before installation.
 
-This is a normal package upgrade, not a
-major Debian release upgrade.
+This is a normal package upgrade, not
+a major Debian release upgrade.
 
 ### Step 3 — Check reboot requirement
 
@@ -248,7 +278,7 @@ major Debian release upgrade.
 test -f /run/reboot-required && cat /run/reboot-required
 ```
 
-If required, reboot during a maintenance window.
+Reboot during a maintenance window if required.
 
 ### Step 4 — Verify services
 
@@ -287,7 +317,7 @@ git clone https://github.com/jackousek/dotfiles.git
 [ ! -e ~/.tmux.conf ] && [ ! -L ~/.tmux.conf ] || mv ~/.tmux.conf ~/.tmux.conf.bak
 
 ln -s ~/dotfiles/vim/.vimrc ~/.vimrc
-ln -s ~/dotfiles/tmux/.tmux.conf
+ln -s ~/dotfiles/tmux/.tmux.conf ~/.tmux.conf
 
 echo '[ -f "$HOME/dotfiles/bash/.bashrc" ] && . "$HOME/dotfiles/bash/.bashrc"' >> ~/.bashrc
 
@@ -300,21 +330,22 @@ source ~/.bashrc
 git -C ~/dotfiles pull --ff-only
 ```
 
-## Update scripts — ROOT
+## Update server scripts — ROOT
 
 ```bash
 git -C /root/git/debian-server-setup pull --ff-only
 ```
 
-## Update SSH policy — ROOT
+## Update SSH security policy — ROOT
 
-Only when the SSH policy changes in Git:
+Use only when the SSH policy changes in Git:
 
 ```bash
 cd /root/git/debian-server-setup
 bash scripts/apply-ssh-hardening.sh
 ```
 
+Keep the original session open.
 Verify a new SSH connection afterward.
 
 ---
@@ -323,11 +354,11 @@ Verify a new SSH connection afterward.
 
 | Script | Purpose |
 |---|---|
-| bootstrap.sh | Create itadmin, install administration packages |
+| bootstrap.sh | Create itadmin and configure administration |
 | standardize-ssh.sh | Restore Debian SSH defaults and apply policy |
-| apply-ssh-hardening.sh | Update SSH security drop-in |
+| apply-ssh-hardening.sh | Update the SSH security drop-in |
 | user-audit.sh | Audit accounts and disable chinook |
-| cleanup-optional.sh | Check legacy services and disable NRPE |
+| cleanup-optional.sh | Disable unused NFS/RPC/NRPE services |
 | enable-security-updates.sh | Configure automatic security updates |
 | create-backup-test.sh | Create timestamp file for backup test |
 
@@ -393,13 +424,21 @@ Standard policy:
 - TCP forwarding permitted where required.
 - Agent forwarding disabled.
 - X11 forwarding disabled.
-- Port 22 unless a server-specific exception exists.
+- Standard SSH port 22.
 
 Restrict SSH access using network firewall rules.
 
 IMPORTANT:
 Keep the original SSH session open during changes.
 SSH scripts do not provide timed automatic rollback.
+
+# AUTOMATIC SECURITY UPDATES
+
+- Debian security updates only.
+- Daily checks and installation.
+- No automatic OS reboot.
+- Verify apt timers and allowed origins.
+- Check critical application restart behavior.
 
 # EXCEL TRACKING
 
@@ -413,4 +452,5 @@ Status:
 - Issue
 
 Mark OK only when all required checks have passed.
+
 
