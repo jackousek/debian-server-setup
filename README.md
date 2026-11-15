@@ -1,18 +1,18 @@
 
 # Debian Server Setup
 
-Standard setup, security and maintenance for Debian servers.
+Standard Debian server setup, security and maintenance.
 
 Repository:
 https://github.com/jackousek/debian-server-setup
 
 # QUICK START — EVERY SERVER
 
-Run commands as root unless stated otherwise.
+Run as root unless stated otherwise.
 
 ## 1. Get scripts
 
-On a new server:
+New server:
 
 ```bash
 apt update && apt install -y git
@@ -22,7 +22,7 @@ git clone https://github.com/jackousek/debian-server-setup.git
 cd debian-server-setup
 ```
 
-On an existing server with the repository:
+Existing server:
 
 ```bash
 cd /root/git/debian-server-setup
@@ -31,155 +31,243 @@ git pull --ff-only
 
 ## 2. SECURITY
 
-- [ ] Create and verify itadmin
-- [ ] Install dotfiles as itadmin (optional)
-- [ ] Standardize SSH configuration
-- [ ] Audit user accounts
-- [ ] Disable chinook
-- [ ] Verify backupsvc SSH access
-- [ ] Review unnecessary services
-- [ ] Enable automatic security updates
-- [ ] Verify SSH and monitoring
-
-Run as root:
+### Step 1 — Bootstrap
 
 ```bash
 bash scripts/bootstrap.sh
 ```
 
-Open a NEW SSH session as itadmin and verify:
+Creates itadmin, installs administration packages,
+configures sudo and copies SSH authorized keys
+when appropriate.
+
+Open a NEW SSH session as itadmin:
 
 ```bash
 id
 sudo -v
 ```
 
+Verify SSH key authentication and sudo.
 Keep the original root session open.
 
-After reviewing existing SSH settings and confirming
-that backupsvc and other required SSH accounts are supported:
+### Step 2 — SSH configuration
+
+Before continuing:
+- Verify itadmin key login and sudo.
+- Check backupsvc and other SSH service accounts.
+- Review custom SSH ports, Match rules and forwarding.
+- Keep console recovery access available.
 
 ```bash
 bash scripts/standardize-ssh.sh
 ```
 
-Immediately test a NEW itadmin SSH connection.
+The script:
+- Backs up the existing SSH configuration.
+- Displays differences from Debian's reference.
+- Restores the Debian SSH reference configuration.
+- Installs our Git-managed security policy.
+- Validates the SSH configuration.
+- Reloads SSH and checks the service.
 
-Audit user accounts:
+Test a NEW itadmin SSH login immediately.
+
+Verify backupsvc access from the backup server.
+
+### Step 3 — User audit
+
+Read-only audit:
 
 ```bash
 bash scripts/user-audit.sh --status
 ```
 
-After reviewing dependencies, disable chinook:
+Automatic chinook cleanup:
 
 ```bash
-bash scripts/user-audit.sh --disable-chinook
+bash scripts/user-audit.sh --apply
 ```
 
-Check unnecessary services:
+The script:
+- Lists UID 0 accounts.
+- Lists accounts with usable passwords.
+- Lists accounts with login shells.
+- Lists SSH authorized_keys files.
+- Lists sudo group membership.
+- Reports whether chinook has UID 0.
+- Reports whether chinook belongs to sudo.
+- Locks chinook's password.
+- Expires chinook's account.
+- Disables chinook's login shell.
+- Removes chinook from the sudo group.
+- Verifies the changes.
+
+No changes are made to root, itadmin or backupsvc.
+
+If chinook has UID 0 or running processes,
+the script stops for manual investigation.
+
+Review unexpected accounts and direct sudo rules.
+
+### Step 4 — Legacy services
 
 ```bash
 bash scripts/cleanup-optional.sh --status
 ```
 
-Disable NRPE only if no longer required:
+Check:
+- nfs-server
+- rpcbind
+- nfs-blkmap
+- fsidd
+- nagios-nrpe-server
+
+Also inspect network listeners:
+
+```bash
+ss -tulpen
+```
+
+Disable NRPE only if replacement monitoring works:
 
 ```bash
 bash scripts/cleanup-optional.sh --disable-nrpe
 ```
 
-NFS and RPC must be reviewed separately.
-The cleanup script does not disable them.
+NFS/RPC services require individual dependency review.
+The script does not automatically disable them.
 
-Enable automatic security updates:
+### Step 5 — Automatic security updates
 
 ```bash
 bash scripts/enable-security-updates.sh
 ```
 
-Review the script's dry-run output and allowed repositories.
-Verify CheckMK monitoring and important applications.
+Target configuration:
+- Debian security updates only.
+- Daily checks and installation.
+- No automatic OS reboot.
 
-SECURITY OK = All checks passed.
+Review the script output and verify the effective
+allowed repositories and dry-run result.
+
+Check timers:
+
+```bash
+systemctl list-timers 'apt-daily*'
+```
+
+Review service restart behavior on critical servers.
+
+### Step 6 — Final security verification
+
+- [ ] itadmin SSH key login works
+- [ ] itadmin sudo works
+- [ ] Root SSH login disabled
+- [ ] SSH password authentication disabled
+- [ ] chinook login disabled
+- [ ] chinook removed from sudo
+- [ ] UID 0 accounts reviewed
+- [ ] Other user passwords reviewed
+- [ ] backupsvc SSH access works
+- [ ] Unnecessary services reviewed
+- [ ] Automatic security updates configured
+- [ ] CheckMK monitoring works
+
+SECURITY OK — All required checks passed.
+
+---
 
 ## 3. BACKUP
 
-- [ ] Create timestamp test file
-- [ ] Wait for next scheduled rsync backup
-- [ ] Verify the file on the backup server
-- [ ] Confirm backup failure email alerts
+### Step 1 — Generate test file
 
-On production server:
+On the production server:
 
 ```bash
 bash scripts/create-backup-test.sh
 ```
 
-The script creates:
+Creates:
 
 ```text
 /root/backup-test.txt
 ```
 
-After the next backup, locate the file on the backup
-server and compare its hostname and timestamp.
+The file contains the hostname and creation timestamp.
 
-This test requires /root to be included in the backup.
+### Step 2 — Verify backup
 
-BACKUP OK = Test file transferred successfully and
-backup failure notifications are configured.
+After the next scheduled rsync backup:
 
-This checks one file transfer, not a full restore.
+- [ ] Locate backup-test.txt on the backup server
+- [ ] Verify hostname
+- [ ] Verify timestamp
+- [ ] Confirm backup failure email notifications
+
+The backup must include /root/.
+
+This checks transfer of the test file, not
+full backup consistency or restore capability.
+
+BACKUP OK — File verified and notifications checked.
+
+---
 
 ## 4. UPDATE
 
-- [ ] Verify backup before updating
-- [ ] Check Debian version
-- [ ] Review pending packages
-- [ ] Perform package updates
-- [ ] Reboot if required
-- [ ] Verify services and applications
-- [ ] Verify CheckMK monitoring
+Do not update before verifying backups.
 
-Check:
+### Step 1 — Check system
 
 ```bash
 cat /etc/os-release
+uname -r
 apt update
 apt list --upgradable
 apt-get -s upgrade
 ```
 
-Perform regular package upgrade:
+Review proposed package changes.
+
+### Step 2 — Update packages
 
 ```bash
 apt upgrade
 ```
 
-After updating:
+Confirm package changes before installation.
 
-```bash
-systemctl --failed
-systemctl list-units --type=service --state=running
-```
+This is a normal package upgrade, not a
+major Debian release upgrade.
 
-Check whether a reboot is required:
+### Step 3 — Check reboot requirement
 
 ```bash
 test -f /run/reboot-required && cat /run/reboot-required
 ```
 
-Reboot during a maintenance window if required.
+If required, reboot during a maintenance window.
 
-Verify SSH, databases, applications, backups and monitoring.
+### Step 4 — Verify services
 
-IMPORTANT:
-apt upgrade is NOT a major Debian version upgrade.
-Major upgrades (for example Debian 12 to 13)
-require a separate procedure.
+```bash
+systemctl --failed
+systemctl status ssh --no-pager
+ss -tulpen
+```
 
-UPDATE OK = Packages updated and services verified.
+Also verify:
+- Databases
+- Applications
+- CheckMK monitoring
+- Backup service
+- Any server-specific services
+
+UPDATE OK — Updates completed and services verified.
+
+Major Debian upgrades require a separate procedure.
 
 ---
 
@@ -194,26 +282,15 @@ Run once:
 ```bash
 cd ~
 git clone https://github.com/jackousek/dotfiles.git
-```
 
-Back up existing configuration files:
-
-```bash
 [ ! -e ~/.vimrc ] && [ ! -L ~/.vimrc ] || mv ~/.vimrc ~/.vimrc.bak
 [ ! -e ~/.tmux.conf ] && [ ! -L ~/.tmux.conf ] || mv ~/.tmux.conf ~/.tmux.conf.bak
-```
 
-Create symlinks:
-
-```bash
 ln -s ~/dotfiles/vim/.vimrc ~/.vimrc
-ln -s ~/dotfiles/tmux/.tmux.conf ~/.tmux.conf
-```
+ln -s ~/dotfiles/tmux/.tmux.conf
 
-Load Git-managed Bash configuration:
-
-```bash
 echo '[ -f "$HOME/dotfiles/bash/.bashrc" ] && . "$HOME/dotfiles/bash/.bashrc"' >> ~/.bashrc
+
 source ~/.bashrc
 ```
 
@@ -223,22 +300,22 @@ source ~/.bashrc
 git -C ~/dotfiles pull --ff-only
 ```
 
-## Update server scripts — ROOT
+## Update scripts — ROOT
 
 ```bash
 git -C /root/git/debian-server-setup pull --ff-only
 ```
 
-## Update SSH security policy — ROOT
+## Update SSH policy — ROOT
 
-Use only when the SSH policy changes in Git:
+Only when the SSH policy changes in Git:
 
 ```bash
 cd /root/git/debian-server-setup
 bash scripts/apply-ssh-hardening.sh
 ```
 
-Keep the existing SSH session open and test a new login.
+Verify a new SSH connection afterward.
 
 ---
 
@@ -246,79 +323,94 @@ Keep the existing SSH session open and test a new login.
 
 | Script | Purpose |
 |---|---|
-| bootstrap.sh | Create itadmin, install packages, configure sudo |
-| standardize-ssh.sh | Restore Debian SSH defaults and apply security policy |
-| apply-ssh-hardening.sh | Update SSH security policy only |
-| user-audit.sh | Audit users and disable chinook |
-| cleanup-optional.sh | Check NFS/RPC/NRPE and optionally disable NRPE |
-| enable-security-updates.sh | Configure daily automatic security updates |
-| create-backup-test.sh | Generate timestamp file for rsync test |
+| bootstrap.sh | Create itadmin, install administration packages |
+| standardize-ssh.sh | Restore Debian SSH defaults and apply policy |
+| apply-ssh-hardening.sh | Update SSH security drop-in |
+| user-audit.sh | Audit accounts and disable chinook |
+| cleanup-optional.sh | Check legacy services and disable NRPE |
+| enable-security-updates.sh | Configure automatic security updates |
+| create-backup-test.sh | Create timestamp file for backup test |
 
-All scripts are located in:
+Scripts directory:
 
 ```text
 /root/git/debian-server-setup/scripts/
 ```
 
-# SECURITY POLICY
+# ACCOUNT SECURITY POLICY
 
-root:
+## root
+
 - Password retained for console recovery.
 - SSH login disabled.
+- UID 0.
 
-itadmin:
-- Standard administrator.
+## itadmin
+
+- Dedicated administrator account.
+- Password for sudo and console authentication.
 - SSH public-key authentication only.
-- Sudo access with password.
+- Member of sudo group.
 
-backupsvc:
+## backupsvc
+
 - Dedicated rsync backup account.
-- SSH public-key authentication.
 - No usable password.
-- Must remain functional after SSH changes.
+- SSH public-key authentication.
+- Must remain active and unexpired.
+- Never modified by user-audit.sh.
 
-chinook:
-- Legacy UID 0 account.
-- Password locked, account expired, shell disabled.
-- Do not delete before reviewing dependencies.
+## chinook
 
-SSH:
-- Standard port 22.
-- Debian's original sshd_config.
-- Git-managed security drop-in.
-- No SSH password authentication.
-- Restrict access using network firewall rules.
+- Legacy administrator account.
+- UID may differ between servers.
+- Password locked.
+- Account expired.
+- Login shell disabled.
+- Removed from sudo group.
+- Files retained.
+- UID 0 or running processes require manual review.
 
-Automatic updates:
-- Debian security updates only.
-- Daily checks and installation.
-- No automatic OS reboot.
-- Review service restart behavior on critical servers.
+## Other accounts
 
-# IMPORTANT
+- Review usable passwords and login shells.
+- Do not disable required application accounts.
+- Do not automatically remove SSH keys or accounts.
 
-Before SSH changes:
-1. Verify a NEW itadmin SSH key login.
-2. Verify sudo.
-3. Check backupsvc and other SSH-dependent services.
-4. Keep the original SSH connection open.
-5. Ensure console recovery access is available.
+# SSH SECURITY POLICY
 
-The SSH scripts have no timed automatic rollback.
+Configuration:
 
-Before disabling services:
-Check dependencies, active connections and monitoring.
+```text
+/etc/ssh/sshd_config
+/etc/ssh/sshd_config.d/01-admin-hardening.conf
+```
 
-Before updating Debian:
-Verify the backup first.
+Standard policy:
+- Root SSH login disabled.
+- Password authentication disabled.
+- SSH public-key authentication enabled.
+- TCP forwarding permitted where required.
+- Agent forwarding disabled.
+- X11 forwarding disabled.
+- Port 22 unless a server-specific exception exists.
 
-# EXCEL STATUS
+Restrict SSH access using network firewall rules.
 
-For every server, record:
+IMPORTANT:
+Keep the original SSH session open during changes.
+SSH scripts do not provide timed automatic rollback.
 
-Security OK | Backup OK | Update OK
+# EXCEL TRACKING
 
-Use OK only when all checks in that stage have passed.
-Use Pending or Issue otherwise.
+Track every server using three columns:
 
+Security | Backup | Update
+
+Status:
+- Pending
+- OK
+- Issue
+
+Mark OK only when all required checks have passed.
 
