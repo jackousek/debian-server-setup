@@ -153,4 +153,32 @@ Git updates do not automatically apply SSH security changes.
 - Verify SSH access before disabling root login.
 - Check service dependencies before disabling anything.
 
+### Standardize SSH configuration (root)
+
+Restores the original Debian `sshd_config` and installs the Git-managed security policy.
+
+Run only after verifying SSH public-key login and sudo access for `itadmin`.
+
+```bash
+cd /root/git/debian-server-setup
+bash scripts/standardize-ssh.sh
+```
+
+The script:
+
+- Verifies the Debian package configuration.
+- Displays differences from the current configuration.
+- Backs up existing SSH files.
+- Requires confirmation before deployment.
+- Installs `01-admin-hardening.conf`.
+- Validates SSH settings before reloading.
+- Restores previous files if deployment fails.
+
+Keep the existing SSH connection open and test a new login immediately afterward.
+
+Review existing SSH customizations and backup accounts before proceeding. No timed automatic rollback is provided.
+
+For ordinary policy updates without replacing the main configuration, use `scripts/apply-ssh-hardening.sh`.
+
+
 
