@@ -2,27 +2,35 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Dedicated Debian rsync backup account.
+# Debian backup service account management
 #
-# --status  Read-only security audit.
-# --apply   Create or standardize backupsvc.
+# --status : Read-only audit
+# --apply  : Create or standardize backupsvc
 #
-# The approved SSH public key is managed here.
-# Never store the private key on this server.
+# Managed configuration:
+# - backupsvc account
+# - SSH authorized_keys
+# - SSH authorized_keys2 (remove if present)
+# - Password authentication disabled for the account
+# - Restricted sudo for rsync
+#
+# Does NOT modify sshd configuration.
+#
+# IMPORTANT:
+# Before rotating keys on an existing server, verify
+# that backup-debian uses the matching private key.
 
 ACCOUNT="backupsvc"
 HOME_DIR="/home/backupsvc"
 SSH_DIR="$HOME_DIR/.ssh"
 KEY_FILE="$SSH_DIR/authorized_keys"
+LEGACY_KEY_FILE="$SSH_DIR/authorized_keys2"
 SUDO_FILE="/etc/sudoers.d/backupsvc"
 
-# Approved public key from backup-debian.
 PUBLIC_KEY='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDP29D9Xk+FDve5kLSh+wJQrlA6LuYFOjjaVz1DyG4j9 backupsvc@backup-debian'
 
-# Disable forwarding, PTY and SSH user RC.
 EXPECTED_KEY="restrict $PUBLIC_KEY"
 
-# Exact observed rsync backup command.
 SUDO_RULE='backupsvc ALL=(root) NOPASSWD: /usr/bin/rsync --server --sender -lHogDtpAXre.iLsfxCIvu --ignore-missing-args --numeric-ids . /'
 
 die() {
@@ -38,8 +46,8 @@ warn() {
 
 case "${1:-}" in
     --status|--apply)
-        MODE="$1"
         [[ $# -eq 1 ]] || die "Unexpected arguments."
+        MODE="$1"
         ;;
     *)
         echo "Usage: $0 --status | --apply"
@@ -51,71 +59,47 @@ account_exists() {
     getent passwd "$ACCOUNT" >/dev/null
 }
 
-check_required_tools() {
-    for tool in getent id passwd chage ssh-keygen \
-                sshd visudo sudo stat; do
+backup_file() {
+    local source="$1"
+    local name="$2"
+    local dest
+
+    dest=$(mktemp "/root/${name}.XXXXXXXX")
+    cp -a "$source" "$dest"
+
+    echo "Backup saved: $dest"
+}
+
+check_tools() {
+    local tool
+
+    for tool in \
+        getent id passwd chage useradd usermod \
+        ssh-keygen sshd visudo sudo stat \
+        rsync install mktemp
+    do
         command -v "$tool" >/dev/null ||
             die "Missing command: $tool"
     done
 }
 
-check_key() {
-    echo
-    echo "=== SSH PUBLIC KEY ==="
-
-    if [[ ! -f "$KEY_FILE" ||
-          -L "$KEY_FILE" ]]; then
-        warn "authorized_keys is missing or invalid."
-        return
-    fi
-
-    echo "Installed key fingerprint:"
-    ssh-keygen -lf "$KEY_FILE" -E sha256 ||
-        warn "Unable to read public key fingerprint."
-
-    if [[ "$(cat "$KEY_FILE")" == "$EXPECTED_KEY" ]]; then
-        echo "AUTHORIZED KEY: OK"
-        echo "Only the approved Ed25519 key is installed."
-    else
-        warn "AUTHORIZED KEY: OUTDATED OR UNEXPECTED"
-        echo "The key file differs from the approved policy."
-        echo "Run --apply to replace its contents."
-    fi
-
-    local uid
-    uid=$(id -u "$ACCOUNT")
-
-    if [[ "$(stat -c '%u:%a' "$SSH_DIR")" \
-          != "$uid:700" ]]; then
-        warn "Incorrect .ssh ownership or permissions."
-    else
-        echo "SSH DIRECTORY: OK"
-    fi
-
-    if [[ "$(stat -c '%u:%a' "$KEY_FILE")" \
-          != "$uid:600" ]]; then
-        warn "Incorrect authorized_keys permissions."
-    else
-        echo "AUTHORIZED_KEYS PERMISSIONS: OK"
-    fi
-}
-
 check_account() {
+    echo
     echo "=== BACKUP SERVICE ACCOUNT ==="
 
     if ! account_exists; then
-        warn "backupsvc does not exist."
+        warn "$ACCOUNT does not exist."
         echo "Run --apply to create the account."
         return
     fi
 
     id "$ACCOUNT"
 
-    local uid gid shell status expiry home
+    local uid gid home shell status expiry
     uid=$(id -u "$ACCOUNT")
     gid=$(id -g "$ACCOUNT")
-    shell=$(getent passwd "$ACCOUNT" | cut -d: -f7)
     home=$(getent passwd "$ACCOUNT" | cut -d: -f6)
+    shell=$(getent passwd "$ACCOUNT" | cut -d: -f7)
     status=$(passwd -S "$ACCOUNT" | awk '{print $2}')
     expiry=$(getent shadow "$ACCOUNT" | cut -d: -f8)
 
@@ -127,13 +111,16 @@ check_account() {
         warn "backupsvc has UID 0!"
 
     [[ "$gid" -ne 0 ]] ||
-        warn "backupsvc has GID 0!"
+        warn "backupsvc has primary GID 0!"
 
     [[ "$home" == "$HOME_DIR" ]] ||
         warn "Unexpected home directory."
 
     [[ "$status" == L ]] ||
         warn "Password is not locked."
+
+    [[ "$shell" == /bin/sh ]] ||
+        warn "Shell differs from standard /bin/sh."
 
     if [[ -n "$expiry" ]] &&
        [[ "$expiry" -le "$(($(date +%s) / 86400))" ]]; then
@@ -142,13 +129,66 @@ check_account() {
 
     if id -nG "$ACCOUNT" |
        tr ' ' '\n' | grep -Fxq sudo; then
-        warn "backupsvc belongs to the sudo group."
+        warn "backupsvc belongs to sudo group."
     fi
-
-    check_key
 }
 
-check_sshd() {
+check_ssh_keys() {
+    echo
+    echo "=== SSH AUTHORIZED KEYS ==="
+
+    account_exists || return
+
+    local uid
+    uid=$(id -u "$ACCOUNT")
+
+    if [[ ! -d "$SSH_DIR" || -L "$SSH_DIR" ]]; then
+        warn ".ssh directory missing or invalid."
+        return
+    fi
+
+    if [[ "$(stat -c '%u:%a' "$SSH_DIR")" \
+          == "$uid:700" ]]; then
+        echo "SSH DIRECTORY: OK"
+    else
+        warn "Incorrect .ssh ownership or permissions."
+    fi
+
+    if [[ ! -f "$KEY_FILE" || -L "$KEY_FILE" ]]; then
+        warn "authorized_keys missing or invalid."
+    else
+        if [[ "$(stat -c '%u:%a' "$KEY_FILE")" \
+              == "$uid:600" ]]; then
+            echo "AUTHORIZED_KEYS PERMISSIONS: OK"
+        else
+            warn "Incorrect authorized_keys permissions."
+        fi
+
+        echo
+        echo "Installed key fingerprint:"
+        ssh-keygen -lf "$KEY_FILE" -E sha256 ||
+            warn "Invalid SSH public key."
+
+        echo
+        if [[ "$(cat "$KEY_FILE")" == "$EXPECTED_KEY" ]]; then
+            echo "AUTHORIZED KEY: OK"
+            echo "Only the approved Ed25519 key is installed."
+        else
+            warn "AUTHORIZED KEY: OUTDATED OR UNEXPECTED"
+            echo "Run --apply to replace existing keys."
+        fi
+    fi
+
+    if [[ -e "$LEGACY_KEY_FILE" ||
+          -L "$LEGACY_KEY_FILE" ]]; then
+        warn "Additional SSH key file exists:"
+        echo "$LEGACY_KEY_FILE"
+    else
+        echo "AUTHORIZED_KEYS2: NOT PRESENT"
+    fi
+}
+
+check_ssh_policy() {
     echo
     echo "=== EFFECTIVE SSH AUTHENTICATION ==="
 
@@ -157,71 +197,62 @@ check_sshd() {
         sshd -T \
             -C user=backupsvc,host=localhost,addr=127.0.0.1
     ) || {
-        warn "Unable to inspect effective SSH policy."
-        return
+        warn "Cannot inspect effective SSH configuration."
+        return 1
     }
 
     echo "$config" | grep -E \
-        '^(authenticationmethods|pubkeyauthentication|passwordauthentication|kbdinteractiveauthentication|authorizedkeysfile|authorizedkeyscommand|trustedusercakeys|hostbasedauthentication|gssapiauthentication) '
+        '^(authenticationmethods|pubkeyauthentication|passwordauthentication|kbdinteractiveauthentication|authorizedkeysfile|authorizedkeyscommand|trustedusercakeys|hostbasedauthentication|gssapiauthentication) ' || true
 
-    local key_files key_command ca
-    key_files=$(
-        echo "$config" |
-        awk '$1=="authorizedkeysfile" {
-            $1=""; sub(/^ /,""); print
-        }'
-    )
+    local value
 
-    key_command=$(
-        echo "$config" |
-        awk '$1=="authorizedkeyscommand" {print $2}'
-    )
+    for setting in \
+        pubkeyauthentication \
+        passwordauthentication \
+        kbdinteractiveauthentication \
+        authenticationmethods \
+        authorizedkeyscommand \
+        trustedusercakeys \
+        hostbasedauthentication \
+        gssapiauthentication
+    do
+        value=$(awk -v key="$setting" \
+            '$1==key {print $2}' <<< "$config")
 
-    ca=$(
-        echo "$config" |
-        awk '$1=="trustedusercakeys" {print $2}'
-    )
+        case "$setting:$value" in
+            pubkeyauthentication:yes|\
+            passwordauthentication:no|\
+            kbdinteractiveauthentication:no|\
+            authenticationmethods:publickey|\
+            authorizedkeyscommand:none|\
+            trustedusercakeys:none|\
+            hostbasedauthentication:no|\
+            gssapiauthentication:no)
+                ;;
+            *)
+                warn "Unexpected SSH policy: $setting=$value"
+                ;;
+        esac
+    done
 
-    if [[ "$key_files" != ".ssh/authorized_keys" ]]; then
-        warn "Other SSH authorized-key paths may be enabled."
-    fi
-
-    if [[ "$key_command" != none ]]; then
-        warn "External SSH key provider is configured."
-    fi
-
-    if [[ "$ca" != none ]]; then
-        warn "SSH certificate authority is configured."
-    fi
-
-    if ! echo "$config" |
-         grep -Fxq 'authenticationmethods publickey'; then
-        warn "SSH is not explicitly limited to publickey."
-    fi
-
-    if ! echo "$config" |
-         grep -Fxq 'passwordauthentication no'; then
-        warn "SSH password authentication may be enabled."
-    fi
-
-    if ! echo "$config" |
-         grep -Fxq 'kbdinteractiveauthentication no'; then
-        warn "Keyboard-interactive authentication may be enabled."
-    fi
+    echo
+    echo "NOTE: SSH configuration is never modified."
 }
 
 check_sudo() {
     echo
-    echo "=== SUDOERS CONFIGURATION ==="
+    echo "=== BACKUP SUDO CONFIGURATION ==="
 
     if [[ ! -f "$SUDO_FILE" ||
           -L "$SUDO_FILE" ]]; then
-        warn "Dedicated sudoers file missing or invalid."
+        warn "Sudoers file missing or invalid."
     else
         stat -c '%U:%G %a %n' "$SUDO_FILE"
 
         if [[ "$(stat -c '%u:%g:%a' "$SUDO_FILE")" \
-              != "0:0:440" ]]; then
+              == "0:0:440" ]]; then
+            echo "SUDOERS PERMISSIONS: OK"
+        else
             warn "Incorrect sudoers permissions."
         fi
 
@@ -240,13 +271,18 @@ check_sudo() {
     fi
 
     echo
-    visudo -c
+    echo "=== SUDO SYNTAX ==="
+
+    visudo -c || warn "Sudo configuration validation failed."
 
     if account_exists; then
         echo
         echo "=== EFFECTIVE SUDO PERMISSIONS ==="
-        sudo -l -U "$ACCOUNT"
-        echo "Review any additional permissions above."
+        sudo -l -U "$ACCOUNT" ||
+            warn "Unable to list sudo permissions."
+
+        echo
+        echo "Review additional sudo permissions and groups."
     fi
 }
 
@@ -259,13 +295,11 @@ create_account() {
     echo
     echo "=== CREATE BACKUP SERVICE ACCOUNT ==="
 
-    if getent group "$ACCOUNT" >/dev/null; then
-        die "Group backupsvc already exists; review manually."
-    fi
+    getent group "$ACCOUNT" >/dev/null &&
+        die "Group backupsvc already exists."
 
-    if [[ -e "$HOME_DIR" || -L "$HOME_DIR" ]]; then
-        die "Home directory already exists; review manually."
-    fi
+    [[ ! -e "$HOME_DIR" && ! -L "$HOME_DIR" ]] ||
+        die "Home directory already exists."
 
     useradd \
         --create-home \
@@ -277,7 +311,7 @@ create_account() {
     echo "BACKUPSVC: CREATED"
 }
 
-apply_account_policy() {
+apply_account() {
     echo
     echo "=== STANDARDIZE ACCOUNT ==="
 
@@ -297,14 +331,11 @@ apply_account_policy() {
 
     if id -nG "$ACCOUNT" |
        tr ' ' '\n' | grep -Fxq sudo; then
-        die "backupsvc belongs to sudo group. Review first."
+        die "backupsvc belongs to sudo group."
     fi
 
     passwd -l "$ACCOUNT"
-
-    # Account must remain usable for SSH public-key auth.
     chage -E -1 "$ACCOUNT"
-
     usermod --shell /bin/sh "$ACCOUNT"
 
     echo "PASSWORD: LOCKED"
@@ -312,42 +343,44 @@ apply_account_policy() {
     echo "SHELL: /bin/sh"
 }
 
-apply_ssh_key() {
+apply_ssh_keys() {
     echo
-    echo "=== STANDARDIZE SSH AUTHORIZED KEY ==="
+    echo "=== STANDARDIZE SSH AUTHORIZED KEYS ==="
 
     if [[ -L "$HOME_DIR" || -L "$SSH_DIR" ||
-          -L "$KEY_FILE" ]]; then
-        die "Symlink detected in backupsvc SSH path."
+          -L "$KEY_FILE" || -L "$LEGACY_KEY_FILE" ]]; then
+        die "Symlink detected in SSH account paths."
     fi
 
     [[ -d "$HOME_DIR" ]] ||
         die "Home directory missing."
+
+    [[ ! -e "$SSH_DIR" || -d "$SSH_DIR" ]] ||
+        die "Invalid .ssh directory."
+
+    [[ ! -e "$KEY_FILE" || -f "$KEY_FILE" ]] ||
+        die "Invalid authorized_keys file."
+
+    [[ ! -e "$LEGACY_KEY_FILE" ||
+       -f "$LEGACY_KEY_FILE" ]] ||
+        die "Invalid authorized_keys2 file."
 
     install -d \
         -o "$ACCOUNT" \
         -g "$(id -gn "$ACCOUNT")" \
         -m 0700 "$SSH_DIR"
 
-    if [[ -e "$KEY_FILE" && ! -f "$KEY_FILE" ]]; then
-        die "authorized_keys is not a regular file."
+    if [[ -f "$KEY_FILE" ]] &&
+       [[ "$(cat "$KEY_FILE")" != "$EXPECTED_KEY" ]]; then
+        backup_file "$KEY_FILE" "backupsvc-old-keys"
     fi
 
-    if [[ -f "$KEY_FILE" ]]; then
-        if [[ "$(cat "$KEY_FILE")" == "$EXPECTED_KEY" ]]; then
-            chown "$ACCOUNT:$(id -gn "$ACCOUNT")" \
-                "$KEY_FILE"
-            chmod 0600 "$KEY_FILE"
-            echo "SSH KEY: ALREADY CURRENT"
-            return
-        fi
-
-        local backup
-        backup=$(mktemp /root/backupsvc-old-keys.XXXXXXXX)
-        cp -a "$KEY_FILE" "$backup"
-        echo "Previous keys saved: $backup"
+    if [[ -f "$LEGACY_KEY_FILE" ]]; then
+        backup_file "$LEGACY_KEY_FILE" \
+            "backupsvc-old-keys2"
     fi
 
+    # Always install exactly one approved key.
     local tmp
     tmp=$(mktemp "$SSH_DIR/.authorized_keys.XXXXXXXX")
 
@@ -358,8 +391,11 @@ apply_ssh_key() {
 
     mv -f "$tmp" "$KEY_FILE"
 
-    echo "SSH KEY: INSTALLED"
-    echo "All previous authorized_keys entries replaced."
+    # Remove additional default SSH key source.
+    rm -f "$LEGACY_KEY_FILE"
+
+    echo "AUTHORIZED KEY: INSTALLED"
+    echo "AUTHORIZED_KEYS2: REMOVED IF PRESENT"
 }
 
 apply_sudo() {
@@ -372,19 +408,28 @@ apply_sudo() {
     [[ ! -L "$SUDO_FILE" ]] ||
         die "Refusing sudoers symlink."
 
-    if [[ -e "$SUDO_FILE" && ! -f "$SUDO_FILE" ]]; then
-        die "Invalid sudoers target."
+    [[ ! -e "$SUDO_FILE" || -f "$SUDO_FILE" ]] ||
+        die "Invalid sudoers file."
+
+    # Save existing sudoers before changing it.
+    if [[ -f "$SUDO_FILE" ]]; then
+        backup_file "$SUDO_FILE" "backupsvc-old-sudoers"
+
+        # Repair known owner/mode problems first.
+        chown root:root "$SUDO_FILE"
+        chmod 0440 "$SUDO_FILE"
     fi
 
+    # Other configuration errors still require investigation.
     visudo -c ||
-        die "Existing sudo configuration is invalid."
+        die "Existing sudo configuration has errors."
 
-    local tmp backup="" had_original=0
+    local tmp
     tmp=$(mktemp /etc/sudoers.d/.backupsvc.XXXXXXXX)
 
     printf '%s\n' \
         '# Backup service account' \
-        '# Exact root rsync sender command' \
+        '# Allow only the observed rsync sender command' \
         '' \
         "$SUDO_RULE" > "$tmp"
 
@@ -393,71 +438,85 @@ apply_sudo() {
 
     if ! visudo -cf "$tmp"; then
         rm -f "$tmp"
-        die "Generated sudoers configuration is invalid."
-    fi
-
-    if [[ -f "$SUDO_FILE" ]]; then
-        had_original=1
-        backup=$(mktemp /root/backupsvc-sudo.XXXXXXXX)
-        cp -a "$SUDO_FILE" "$backup"
+        die "Generated sudoers rule is invalid."
     fi
 
     mv -f "$tmp" "$SUDO_FILE"
 
-    if ! visudo -c; then
-        echo "ERROR: Restoring previous sudoers configuration."
-
-        if [[ "$had_original" -eq 1 ]]; then
-            cp -a "$backup" "$SUDO_FILE"
-        else
-            rm -f "$SUDO_FILE"
-        fi
-
-        die "Sudoers validation failed."
-    fi
+    visudo -c ||
+        die "Final sudoers validation failed."
 
     echo "SUDOERS: INSTALLED"
+    echo "OWNER: root:root"
+    echo "MODE: 0440"
 }
 
-check_required_tools
+check_approved_key() {
+    local tmp
+    tmp=$(mktemp)
+
+    printf '%s\n' "$PUBLIC_KEY" > "$tmp"
+
+    if ! ssh-keygen -lf "$tmp" -E sha256; then
+        rm -f "$tmp"
+        die "Approved Ed25519 key is invalid."
+    fi
+
+    rm -f "$tmp"
+}
+
+check_tools
 
 case "$MODE" in
     --status)
         check_account
-        check_sshd
+        check_ssh_keys
+        check_ssh_policy
         check_sudo
         ;;
 
     --apply)
+        echo "=== APPLY BACKUP SERVICE POLICY ==="
+
+        check_approved_key
+
+        # Check before making changes.
         [[ -x /usr/bin/rsync ]] ||
             die "/usr/bin/rsync is not installed."
+
+        if [[ -L "$SUDO_FILE" ||
+              ( -e "$SUDO_FILE" && ! -f "$SUDO_FILE" ) ]]; then
+            die "Invalid sudoers target."
+        fi
+
+        # Repair the known sudoers permission issue before
+        # account changes or SSH key rotation.
+        apply_sudo_precheck_needed=0
+
+        if [[ -f "$SUDO_FILE" ]]; then
+            backup_file "$SUDO_FILE" \
+                "backupsvc-sudoers-precheck"
+            chown root:root "$SUDO_FILE"
+            chmod 0440 "$SUDO_FILE"
+        fi
 
         visudo -c ||
             die "Existing sudo configuration is invalid."
 
-        # Confirm the approved public key is syntactically valid.
-        tmpkey=$(mktemp)
-        printf '%s\n' "$PUBLIC_KEY" > "$tmpkey"
-
-        if ! ssh-keygen -lf "$tmpkey" -E sha256; then
-            rm -f "$tmpkey"
-            die "Approved public key is invalid."
-        fi
-        rm -f "$tmpkey"
-
         create_account
-        apply_account_policy
-        apply_ssh_key
+        apply_account
         apply_sudo
+        apply_ssh_keys
 
         echo
         echo "=== FINAL AUDIT ==="
         check_account
-        check_sshd
+        check_ssh_keys
+        check_ssh_policy
         check_sudo
+
+        echo
+        echo "BACKUP SERVICE POLICY APPLIED"
         ;;
 esac
-
-echo
-echo "BACKUP SERVICE ACCOUNT CHECK COMPLETED"
 
