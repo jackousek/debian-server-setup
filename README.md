@@ -112,44 +112,95 @@ passwd -S chinook 2>/dev/null || true
 
 Only `root` should normally retain UID 0. For a system where `chinook` previously had UID 0, verify a tested backup and console access **before** applying its account migration. If the script reports an error, stop and investigate; do not repeatedly rerun it without checking what changed.
 
-### 2.4 Audit and standardize backup sudo permissions
+### 2.4 Backup Service Account — SSH Key and Sudo
 
-This step applies only where the dedicated `backupsvc` account is used. It must not create `backupsvc` on other servers.
+Manage the dedicated `backupsvc` account used for rsync backups.
 
-Audit:
+#### Check configuration
 
 ```bash
 bash scripts/backup-sudo.sh --status
 ```
 
-Standardize after reviewing the existing permissions and confirming the actual backup command matches:
+The script checks:
+- Whether `backupsvc` exists.
+- Whether password authentication is locked.
+- Whether the account is active and not expired.
+- Whether the approved Ed25519 public key is installed.
+- Whether additional SSH keys are present.
+- SSH directory and file permissions.
+- Sudoers configuration and permissions.
+- Effective sudo privileges.
+
+#### Apply standard configuration
 
 ```bash
-bash
 bash scripts/backup-sudo.sh --apply
 ```
 
-Required sudoers configuration at `/etc/sudoers.d/backupsvc`:
+If `backupsvc` does not exist:
+- Create the account.
+- Configure `/bin/sh` for rsync over SSH.
+- Lock password authentication.
+- Ensure the account is not expired.
+- Install the approved SSH public key.
+- Configure restricted sudo permissions.
+
+If `backupsvc` already exists:
+- Preserve the account.
+- Lock password authentication.
+- Replace existing authorized_keys with the approved key.
+- Correct SSH file permissions.
+- Standardize sudo configuration.
+
+#### Approved SSH key
+
+Only this public key is permitted in
+`/home/backupsvc/.ssh/authorized_keys`:
+
+```text
+restrict ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDP29D9Xk+FDve5kLSh+wJQrlA6LuYFOjjaVz1DyG4j9 backupsvc@backup-debian
+```
+
+Permissions:
+- `/home/backupsvc/.ssh`: `0700`
+- `authorized_keys`: `0600`
+- Owner: `backupsvc`
+
+The corresponding private key remains exclusively on
+`backup-debian`.
+
+#### Sudo configuration
+
+File: `/etc/sudoers.d/backupsvc`
 
 ```sudoers
-# Backup service account
-# Allow only the observed rsync backup command
 backupsvc ALL=(root) NOPASSWD: /usr/bin/rsync --server --sender -lHogDtpAXre.iLsfxCIvu --ignore-missing-args --numeric-ids . /
 ```
 
-Required owner and mode: `root:root`, `0440`.
+Required permissions:
+- Owner: `root:root`
+- Mode: `0440`
 
-**Verify:**
+#### Verification
 
 ```bash
-visudo -c
-stat -c '%U:%G %a %n' /etc/sudoers.d/backupsvc
+id backupsvc
+passwd -S backupsvc
+ssh-keygen -lf /home/backupsvc/.ssh/authorized_keys -E sha256
 sudo -l -U backupsvc
+visudo -c
 ```
 
-Verify that no other sudoers or group rules grant `backupsvc` broader privileges. The rule gives root-level read access through rsync; its SSH key and the backup server must be protected accordingly. If the account is absent, record the warning and confirm how that server is backed up. After any change, verify a real backup job.
-
-> **Security:** A fixed rsync command is narrower than `NOPASSWD: ALL`, but it is still highly privileged. Never replace the exact arguments with a wildcard to work around a failing backup.
+IMPORTANT:
+- The script does not change sshd configuration.
+- Global SSH policy already requires public-key authentication.
+- All other keys in authorized_keys are removed by --apply.
+- Confirm the backup server uses the matching private key.
+- Test an actual backup after changing keys.
+- Do not rotate every server simultaneously.
+- Review any additional sudo privileges separately.
+- Other SSH key authorization sources are not modified.
 
 ### 2.5 Disable unnecessary NFS, RPC, and legacy NRPE services
 
@@ -379,7 +430,7 @@ When changing scripts, stage the actual script files as well; do not assume that
 | `standardize-ssh.sh` | Standardize SSH configuration and apply policy |
 | `apply-ssh-hardening.sh` | Reapply SSH security policy changes |
 | `user-audit.sh` | Audit accounts and retire `chinook` |
-| `backup-sudo.sh` | Audit and standardize dedicated backup sudo permissions |
+| `backup-sudo.sh` | Create or audit backupsvc, enforce approved SSH key and restricted sudo |
 | `cleanup-optional.sh` | Stop and mask unused NFS/RPC/NRPE units |
 | `enable-security-updates.sh` | Configure unattended Debian security updates |
 | `create-backup-test.sh` | Create a timestamped backup verification file |
